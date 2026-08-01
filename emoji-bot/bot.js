@@ -5,8 +5,8 @@ require('dotenv').config();
 
 // ---------- CONFIG ----------
 const DATA_FILE = './emojiCounts.json';
-const SUMMARY_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const SUMMARY_CHANNEL_ID = process.env.SUMMARY_CHANNEL_ID || null; // optional: channel to auto-post summary in
+const PIN_CHANNEL_ID = process.env.PIN_CHANNEL_ID || null; // channel with the live-updating pinned count
+const PINNED_MSG_FILE = './pinnedMessageId.json'; // remembers which message to edit
 
 // ---------- EMOJI DETECTION ----------
 // Custom Discord emojis: <:name:id> or <a:name:id>
@@ -35,6 +35,41 @@ function saveCounts(counts) {
 
 let emojiCounts = loadCounts();
 
+// ---------- PINNED MESSAGE TRACKING ----------
+function loadPinnedMessageId() {
+  try {
+    return JSON.parse(fs.readFileSync(PINNED_MSG_FILE, 'utf8')).messageId;
+  } catch {
+    return null;
+  }
+}
+
+function savePinnedMessageId(id) {
+  fs.writeFileSync(PINNED_MSG_FILE, JSON.stringify({ messageId: id }));
+}
+
+async function updatePinnedCount(channel) {
+  const count = emojiCounts[PIN_CHANNEL_ID] || 0;
+  const text = `🍞 Emojis counted in this channel: **${count}**`;
+  let messageId = loadPinnedMessageId();
+
+  // Try editing the existing pinned message
+  if (messageId) {
+    try {
+      const msg = await channel.messages.fetch(messageId);
+      await msg.edit(text);
+      return;
+    } catch {
+      // message was deleted or not found - fall through to create a new one
+    }
+  }
+
+  // No existing message - create and pin a new one
+  const newMsg = await channel.send(text);
+  await newMsg.pin();
+  savePinnedMessageId(newMsg.id);
+}
+
 // ---------- DISCORD CLIENT ----------
 const client = new Client({
   intents: [
@@ -44,20 +79,16 @@ const client = new Client({
   ],
 });
 
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  // Optional: post a summary to a fixed channel every 5 minutes
-  if (SUMMARY_CHANNEL_ID) {
-    setInterval(async () => {
-      try {
-        const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
-        const total = emojiCounts[SUMMARY_CHANNEL_ID] || 0;
-        channel.send(`📊 Emoji count update: **${total}** emojis counted in this channel so far.`);
-      } catch (err) {
-        console.error('Failed to post summary:', err.message);
-      }
-    }, SUMMARY_INTERVAL_MS);
+  if (PIN_CHANNEL_ID) {
+    try {
+      const channel = await client.channels.fetch(PIN_CHANNEL_ID);
+      await updatePinnedCount(channel); // make sure the pinned message exists on startup
+    } catch (err) {
+      console.error('Failed to set up pinned count message:', err.message);
+    }
   }
 });
 
@@ -83,6 +114,13 @@ client.on('messageCreate', (message) => {
   if (found > 0) {
     emojiCounts[message.channelId] = (emojiCounts[message.channelId] || 0) + found;
     saveCounts(emojiCounts);
+
+    // If this message is in the pinned-count channel, refresh the pinned message
+    if (PIN_CHANNEL_ID && message.channelId === PIN_CHANNEL_ID) {
+      updatePinnedCount(message.channel).catch((err) =>
+        console.error('Failed to update pinned count:', err.message)
+      );
+    }
   }
 });
 
