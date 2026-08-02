@@ -8,6 +8,7 @@ const DATA_FILE = './emojiCounts.json';
 const USER_DATA_FILE = './userEmojiCounts.json';
 const PIN_CHANNEL_ID = process.env.PIN_CHANNEL_ID || null; // channel with the live-updating pinned count
 const PINNED_MSG_FILE = './pinnedMessageId.json'; // remembers which message to edit
+const PINNED_LEADERBOARD_FILE = './pinnedLeaderboardId.json'; // remembers the leaderboard pinned message
  
 // ---------- EMOJI DETECTION ----------
 // Custom Discord emojis: <:name:id> or <a:name:id>
@@ -50,22 +51,20 @@ let emojiCounts = loadCounts();
 let userEmojiCounts = loadUserCounts();
  
 // ---------- PINNED MESSAGE TRACKING ----------
-function loadPinnedMessageId() {
+function loadPinnedId(file) {
   try {
-    return JSON.parse(fs.readFileSync(PINNED_MSG_FILE, 'utf8')).messageId;
+    return JSON.parse(fs.readFileSync(file, 'utf8')).messageId;
   } catch {
     return null;
   }
 }
  
-function savePinnedMessageId(id) {
-  fs.writeFileSync(PINNED_MSG_FILE, JSON.stringify({ messageId: id }));
+function savePinnedId(file, id) {
+  fs.writeFileSync(file, JSON.stringify({ messageId: id }));
 }
  
-async function updatePinnedCount(channel) {
-  const count = emojiCounts[PIN_CHANNEL_ID] || 0;
-  const text = `🍞 Emojis counted in this channel: **${count}**`;
-  let messageId = loadPinnedMessageId();
+async function updatePinnedMessage(channel, file, text) {
+  let messageId = loadPinnedId(file);
  
   // Try editing the existing pinned message
   if (messageId) {
@@ -81,7 +80,35 @@ async function updatePinnedCount(channel) {
   // No existing message - create and pin a new one
   const newMsg = await channel.send(text);
   await newMsg.pin();
-  savePinnedMessageId(newMsg.id);
+  savePinnedId(file, newMsg.id);
+}
+ 
+function buildCountText() {
+  const count = emojiCounts[PIN_CHANNEL_ID] || 0;
+  return `🍞 Emojis counted in this channel: **${count}**`;
+}
+ 
+function buildLeaderboardText() {
+  const entries = Object.values(userEmojiCounts)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+ 
+  if (entries.length === 0) {
+    return '**Emoji Leaderboard** 🍞\nNo emojis counted yet!';
+  }
+ 
+  const medals = ['🥇', '🥈', '🥉'];
+  const lines = entries.map((entry, i) => {
+    const rank = medals[i] || `${i + 1}.`;
+    return `${rank} ${entry.username} — **${entry.count}**`;
+  });
+ 
+  return `**Emoji Leaderboard** 🍞\n${lines.join('\n')}`;
+}
+ 
+async function refreshPins(channel) {
+  await updatePinnedMessage(channel, PINNED_MSG_FILE, buildCountText());
+  await updatePinnedMessage(channel, PINNED_LEADERBOARD_FILE, buildLeaderboardText());
 }
  
 // ---------- DISCORD CLIENT ----------
@@ -99,7 +126,7 @@ client.once('ready', async () => {
   if (PIN_CHANNEL_ID) {
     try {
       const channel = await client.channels.fetch(PIN_CHANNEL_ID);
-      await updatePinnedCount(channel); // make sure the pinned message exists on startup
+      await refreshPins(channel); // make sure both pinned messages exist on startup
     } catch (err) {
       console.error('Failed to set up pinned count message:', err.message);
     }
@@ -134,22 +161,7 @@ client.on('messageCreate', (message) => {
  
   // Command: !emojileaderboard - shows top senders across all channels
   if (message.content === '!emojileaderboard') {
-    const entries = Object.values(userEmojiCounts)
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 10);
- 
-    if (entries.length === 0) {
-      message.reply('No emojis counted yet!');
-      return;
-    }
- 
-    const medals = ['🥇', '🥈', '🥉'];
-    const lines = entries.map((entry, i) => {
-      const rank = medals[i] || `${i + 1}.`;
-      return `${rank} ${entry.username} — **${entry.count}**`;
-    });
- 
-    message.reply(`**Emoji Leaderboard** 🍞\n${lines.join('\n')}`);
+    message.reply(buildLeaderboardText());
     return;
   }
  
@@ -167,10 +179,10 @@ client.on('messageCreate', (message) => {
     userEmojiCounts[userId].count += found;
     saveUserCounts(userEmojiCounts);
  
-    // If this message is in the pinned-count channel, refresh the pinned message
+    // If this message is in the pinned-count channel, refresh both pinned messages
     if (PIN_CHANNEL_ID && message.channelId === PIN_CHANNEL_ID) {
-      updatePinnedCount(message.channel).catch((err) =>
-        console.error('Failed to update pinned count:', err.message)
+      refreshPins(message.channel).catch((err) =>
+        console.error('Failed to update pinned messages:', err.message)
       );
     }
   }
